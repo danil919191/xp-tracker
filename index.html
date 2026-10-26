@@ -194,6 +194,14 @@ section{margin-top:20px}
 }
 .sync .st{width:7px;height:7px;border-radius:50%;background:var(--ok)}
 .sync.warn .st{background:var(--danger)}
+.pairrow{display:flex;align-items:center;gap:10px}
+.pair-code{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:22px;font-weight:700;letter-spacing:.08em;color:var(--text);
+  background:var(--bg);border:1px solid var(--border);border-radius:12px;
+  padding:12px 16px;flex:1;text-align:center
+}
+.syncrow{display:flex;align-items:center;gap:12px;margin-top:14px}
 
 /* ---------- bottom nav ---------- */
 .nav{
@@ -370,6 +378,25 @@ section{margin-top:20px}
         <div id="removed-list"></div>
       </div>
     </section>
+
+    <section>
+      <div class="card" id="sync-card">
+        <div class="sec-h" style="margin-bottom:10px"><h2>Sync devices</h2></div>
+        <p class="ed-hint" style="margin-bottom:12px">Open this page on your other device and enter the code below — from then on they stay in sync automatically, even offline-tolerant.</p>
+        <div class="pairrow">
+          <span class="pair-code" id="pair-code">····-····-····</span>
+          <button class="btn" id="copy-code">Copy</button>
+        </div>
+        <div class="ed-add" style="margin-top:14px">
+          <input id="join-code" placeholder="Code from your other device" maxlength="14" autocapitalize="characters" autocorrect="off" enterkeyhint="done">
+          <button class="btn primary" id="join-btn">Link</button>
+        </div>
+        <div class="syncrow">
+          <button class="btn" id="sync-now">Sync now</button>
+          <span class="sub" id="sync-last"></span>
+        </div>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -436,12 +463,14 @@ function migrate(s){
   if (!Array.isArray(s.categories) || !Array.isArray(s.entries)) return null;
   s.meta = s.meta || {};
   s.meta.badges = Array.isArray(s.meta.badges) ? s.meta.badges : [];
+  s.meta.deleted = Array.isArray(s.meta.deleted) ? s.meta.deleted : [];
   if (!s.deviceKey) s.deviceKey = uid() + uid();
   s.categories.forEach(c => {
     if (typeof c.quick === 'string') c.quick = c.quick.split(',').map(x => parseFloat(x)).filter(x => x > 0);
     if (!Array.isArray(c.quick)) c.quick = [];
     c.target = Math.max(0, +c.target || 0);
     c.xp = Math.max(0, +c.xp || 0);
+    c.mod = +c.mod || 0;
   });
   return s;
 }
@@ -880,6 +909,7 @@ $('undo-btn').addEventListener('click', () => {
   const e = state.entries[state.entries.length - 1];
   const c = catById(e.catId);
   state.entries.pop();
+  state.meta.deleted = [...state.meta.deleted, e.id].slice(-500);   // tombstone: undo must survive device merges
   save(); render();
   toast(`↩ Undid ${fmt(e.amount)} ${esc(c ? c.unit : '')} · ${esc(c ? c.name : 'removed category')}`);
 });
@@ -900,7 +930,7 @@ function renderEdit(){
     card.innerHTML = `
       <div class="ehead">
         <span class="cat-dot"></span>
-        <button class="nm" data-act="toggle"><span>${esc(c.name)}</span><small>${periodLbl} · ${fmt(c.xp)} XP per ${esc(c.unit)}</small></button>
+        <button class="nm" data-act="toggle"><span>${esc(c.name)}</span><small>${periodLbl} · ${fmt(c.xp)} XP per ${esc(c.xp === 1 && c.unit.length > 3 && !/ss$/.test(c.unit) ? c.unit.replace(/(es|s)$/, '') : c.unit)}</small></button>
         <button class="iconbtn" data-act="up" ${idx === 0 ? 'disabled' : ''} aria-label="Move up"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg></button>
         <button class="iconbtn" data-act="down" ${idx === cats.length - 1 ? 'disabled' : ''} aria-label="Move down"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></button>
       </div>
@@ -947,6 +977,11 @@ function renderEdit(){
 
 function editListHandler(ev){
   const btn = ev.target.closest('button');
+  if (btn && btn.dataset.restore){
+    const rc = catById(btn.dataset.restore);
+    if (rc){ rc.archived = false; rc.mod = Date.now(); save(); renderEdit(); toast(`Restored “${esc(rc.name)}”`); }
+    return;
+  }
   const card = ev.target.closest('.ecard');
   if (!card) return;
   const cat = catById(card.dataset.cat);
@@ -960,25 +995,24 @@ function editListHandler(ev){
       const i = arr.indexOf(cat);
       let j = i;
       do { j += act === 'up' ? -1 : 1; } while (j >= 0 && j < arr.length && arr[j].archived);
-      if (j >= 0 && j < arr.length){ [arr[i], arr[j]] = [arr[j], arr[i]]; save(); renderEdit(); }
+      if (j >= 0 && j < arr.length){
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+        const now = Date.now(); arr[i].mod = now; arr[j].mod = now;
+        save(); renderEdit();
+      }
       return;
     }
     if (act === 'remove'){
       openSheet(`Remove “${cat.name}”?`,
         'Its past history stays — entries still count toward lifetime XP and show in past weeks. You can restore it below anytime.',
-        () => { cat.archived = true; openCards.delete(cat.id); save(); renderEdit(); toast(`Removed “${esc(cat.name)}” — history kept`); });
+        () => { cat.archived = true; cat.mod = Date.now(); openCards.delete(cat.id); save(); renderEdit(); toast(`Removed “${esc(cat.name)}” — history kept`); });
       return;
     }
     if (btn.dataset.p){
-      cat.period = btn.dataset.p; save(); renderEdit(); return;
+      cat.period = btn.dataset.p; cat.mod = Date.now(); save(); renderEdit(); return;
     }
     if (btn.dataset.col){
-      cat.color = btn.dataset.col; save(); renderEdit(); return;
-    }
-    if (btn.dataset.restore){
-      const rc = catById(btn.dataset.restore);
-      if (rc){ rc.archived = false; save(); renderEdit(); toast(`Restored “${esc(rc.name)}”`); }
-      return;
+      cat.color = btn.dataset.col; cat.mod = Date.now(); save(); renderEdit(); return;
     }
   }
   // text inputs are handled by the delegated 'change' listener, not here
@@ -993,6 +1027,7 @@ function commitField(inp){
   else if (f === 'target') cat.target = Math.max(0, parseFloat(inp.value.replace(',', '.')) || 0);
   else if (f === 'xp') cat.xp = Math.max(0, parseFloat(inp.value.replace(',', '.')) || 0);
   else if (f === 'quick') cat.quick = inp.value.split(',').map(x => parseFloat(x.trim())).filter(x => x > 0).slice(0, 4);
+  cat.mod = Date.now();
   save(); savedPulse();
   renderEdit();
 }
@@ -1018,7 +1053,7 @@ function addCategory(){
   const name = $('new-cat-name').value.trim();
   if (!name){ toast('Give the category a name first'); $('new-cat-name').focus(); return; }
   const color = PALETTE[state.categories.length % PALETTE.length];
-  const c = { id: uid(), name, color, unit: 'minutes', target: 30, period: 'day', xp: 1, quick: [15, 30, 60] };
+  const c = { id: uid(), name, color, unit: 'minutes', target: 30, period: 'day', xp: 1, quick: [15, 30, 60], mod: Date.now() };
   state.categories.push(c);
   openCards.add(c.id);
   $('new-cat-name').value = '';
@@ -1042,52 +1077,213 @@ $('view-edit').addEventListener('change', ev => {
   if (inp) commitField(inp);
 });
 
-/* ================= sync ================= */
-let pushTimer = null, lastPushOk = null;
-function schedulePush(){
-  clearTimeout(pushTimer);
-  pushTimer = setTimeout(pushState, 1500);
+/* ================= sync (Supabase, multi-device) ================= */
+const SB_URL = 'https://pzlidsevzjafwunsgtyb.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB6bGlkc2V2emphZnd1bnNndHliIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxMjc1MDQsImV4cCI6MjEwMDcwMzUwNH0.m-7-1Wu6zCVtw9Q0T6MiIbRtxxo3XSP2a4K39okkaP8';   // public anon key — the RPCs are the only exposed surface
+const SYNC_KEY = 'xpSync';
+const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';   // no I,L,O,0,1
+let pushTimer = null;
+let sync = loadSync();
+
+function loadSync(){
+  try { const s = JSON.parse(lsGet(SYNC_KEY) || 'null'); if (s && typeof s.key === 'string') return s; } catch(_){}
+  return null;
 }
-function syncLine(ok, when){
-  const el = $('sync-line');
-  el.classList.toggle('warn', !ok && ok !== null);
-  $('sync-text').textContent = ok === null ? 'Saved on this device'
-    : memoryOnly ? 'Private mode — data won’t persist'
-    : ok ? 'Synced · ' + when : 'Saved locally — sync offline';
-  el.classList.toggle('warn', memoryOnly || ok === false);
+function storeSync(){ lsSet(SYNC_KEY, JSON.stringify(sync)); }
+function makeGroupKey(){
+  const b = new Uint8Array(12);
+  crypto.getRandomValues(b);
+  let raw = ''; for (const x of b) raw += CODE_ALPHABET[x % CODE_ALPHABET.length];
+  return `${raw.slice(0,4)}-${raw.slice(4,8)}-${raw.slice(8)}`;
 }
-function pushPayload(){
+function normCode(v){
+  const c = String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return c.length === 12 ? `${c.slice(0,4)}-${c.slice(4,8)}-${c.slice(8)}` : null;
+}
+
+async function rpc(fn, args){
+  const res = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', apikey: SB_ANON, Authorization: 'Bearer ' + SB_ANON },
+    body: JSON.stringify(args)
+  });
+  if (!res.ok) throw new Error('rpc ' + res.status);
+  return res.json();
+}
+
+function payloadState(){
   const entries = state.entries.length > 4000 ? state.entries.slice(-4000) : state.entries;
-  return JSON.stringify({ deviceKey: state.deviceKey, state: { v: state.v, categories: state.categories, entries, meta: { badges: state.meta.badges, celebratedLevel: state.meta.celebratedLevel } } });
+  return { v: state.v, categories: state.categories, entries, meta: state.meta };
 }
-async function pushState(){
+function saveLocalOnly(){ if (!lsSet(LS_KEY, JSON.stringify(state))) memoryOnly = true; }
+
+/* Merge a server state (higher rev) into local: union entries + tombstones,
+   per-category newest-mod wins, meta unions. Returns merged state or null. */
+function isPristine(s){
+  return Array.isArray(s.entries) && s.entries.length === 0
+    && !((s.meta && s.meta.deleted) || []).length
+    && !((s.meta && s.meta.badges) || []).length
+    && !(s.categories || []).some(c => +c.mod > 0);
+}
+function mergeStates(server){
   try {
-    const res = await fetch('/api/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: pushPayload()
+    const sv = JSON.parse(JSON.stringify(server));
+    if (!sv || !Array.isArray(sv.categories) || !Array.isArray(sv.entries)) return null;
+    /* A brand-new device (no logs, no edits) adopts the group state as-is —
+       no union of duplicate starter categories. */
+    if (isPristine(state)){
+      const adopted = migrate({ ...sv, deviceKey: state.deviceKey });
+      return adopted;
+    }
+    const deleted = new Set([...(state.meta.deleted || []), ...((sv.meta && sv.meta.deleted) || [])]);
+    const seen = new Set();
+    const entries = [];
+    for (const e of [...state.entries, ...sv.entries]){
+      if (!e || !e.id || deleted.has(e.id) || seen.has(e.id)) continue;
+      seen.add(e.id); entries.push(e);
+    }
+    entries.sort((a, b) => a.ts - b.ts);
+    const byId = {};
+    for (const c of state.categories) byId[c.id] = c;
+    for (const c of sv.categories){
+      const mine = byId[c.id];
+      byId[c.id] = (!mine || (+c.mod || 0) > (+mine.mod || 0)) ? c : mine;
+    }
+    const localOrder = state.categories.map(c => c.id);
+    const cats = Object.values(byId).sort((a, b) => {
+      const ia = localOrder.indexOf(a.id), ib = localOrder.indexOf(b.id);
+      return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
     });
-    lastPushOk = res.ok;
-    syncLine(res.ok, new Date().toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' }));
-  } catch(e){
-    lastPushOk = false;
-    syncLine(false);
+    const meta = {
+      celebratedLevel: Math.max(state.meta.celebratedLevel || 1, (sv.meta && sv.meta.celebratedLevel) || 1),
+      celebratedRank: state.meta.celebratedRank || null,
+      badges: [...new Set([...(state.meta.badges || []), ...((sv.meta && sv.meta.badges) || [])])],
+      deleted: [...deleted].slice(-500)
+    };
+    return migrate({ v: Math.max(state.v || 1, sv.v || 1), deviceKey: state.deviceKey, categories: cats, entries, meta });
+  } catch(e){ return null; }
+}
+
+function syncLine(ok){
+  const el = $('sync-line');
+  if (memoryOnly){ $('sync-text').textContent = 'Private mode — data won’t persist'; el.classList.add('warn'); return; }
+  if (ok === null){ $('sync-text').textContent = 'Saved on this device'; el.classList.remove('warn'); return; }
+  if (ok){
+    $('sync-text').textContent = 'Synced · ' + new Date().toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' });
+    el.classList.remove('warn');
+  } else {
+    $('sync-text').textContent = 'Saved locally — sync will retry';
+    el.classList.add('warn');
   }
 }
+
+async function pushState(isRetry){
+  if (!sync || memoryOnly) return false;
+  try {
+    const r = await rpc('xp_push', { p_group_key: sync.key, p_state: payloadState(), p_base_rev: sync.rev || 0 });
+    if (r && r.ok){ sync.rev = r.rev; storeSync(); syncLine(true); syncCardRender(); return true; }
+    if (r && r.conflict && !isRetry){
+      const merged = mergeStates(r.state);
+      if (merged){
+        state = merged; saveLocalOnly(); render();
+        if ($('view-edit').classList.contains('active')) renderEdit();
+        sync.rev = r.rev; storeSync();
+        return pushState(true);
+      }
+      sync.rev = r.rev; storeSync(); syncLine(false); return false;
+    }
+    syncLine(false); return false;
+  } catch(e){
+    syncLine(false);
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(pushState, 30000);   // offline retry
+    return false;
+  }
+}
+async function pullState(quiet){
+  if (!sync || memoryOnly) return false;
+  try {
+    const r = await rpc('xp_pull', { p_group_key: sync.key });
+    if (!r || !r.exists) return false;
+    if ((r.rev || 0) > (sync.rev || 0)){
+      const merged = mergeStates(r.state);
+      state = merged || state;
+      saveLocalOnly(); render();
+      if ($('view-edit').classList.contains('active')) renderEdit();
+      sync.rev = r.rev; storeSync();
+      if (merged) pushState();               // re-push merged view so revs converge
+    }
+    syncCardRender();
+    if (!quiet) syncLine(true);
+    return true;
+  } catch(e){ return false; }
+}
+function schedulePush(){
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => pushState(), 1800);
+}
+
+/* ---- sync card (Categories screen) ---- */
+function syncCardRender(){
+  const codeEl = $('pair-code');
+  if (codeEl) codeEl.textContent = sync ? sync.key : '····-····-····';
+  const last = $('sync-last');
+  if (last && sync) last.textContent = sync.rev ? `Revision ${sync.rev}` : 'Not synced yet';
+}
+$('copy-code').addEventListener('click', async () => {
+  if (!sync) return;
+  try { await navigator.clipboard.writeText(sync.key); toast('Pairing code copied'); }
+  catch(_){ toast('Copy failed — write it down'); }
+});
+$('sync-now').addEventListener('click', async () => {
+  toast('Syncing…', 1200);
+  const a = await pullState(true);
+  const b = await pushState();
+  if (!a && !b) toast('Sync unavailable — will retry');
+});
+$('join-btn').addEventListener('click', joinDevice);
+$('join-code').addEventListener('keydown', ev => { if (ev.key === 'Enter') joinDevice(); });
+async function joinDevice(){
+  const code = normCode($('join-code').value);
+  if (!code){ toast('Enter the 12-character code'); return; }
+  if (sync && code === sync.key){ toast('This device already uses that code'); return; }
+  toast('Linking…', 1500);
+  try {
+    const r = await rpc('xp_pull', { p_group_key: code });
+    if (!r || !r.exists){ toast('Code not found — check it on your other device'); return; }
+    const merged = mergeStates(r.state);
+    state = merged || state;
+    saveLocalOnly(); render();
+    sync = { key: code, rev: r.rev || 0 };
+    storeSync(); syncCardRender();
+    $('join-code').value = '';
+    toast('Linked — this device now syncs');
+    pushState();
+  } catch(e){ toast('Could not reach the server — try again'); }
+}
+
+/* ---- lifecycle ---- */
+if (!sync && !memoryOnly){ sync = { key: makeGroupKey(), rev: 0 }; storeSync(); }
 window.addEventListener('pagehide', () => {
-  try { navigator.sendBeacon('/api/sync', new Blob([pushPayload()], { type: 'application/json' })); } catch(e){}
+  if (!sync || memoryOnly) return;
+  try {
+    const body = JSON.stringify({ p_group_key: sync.key, p_state: payloadState(), p_base_rev: sync.rev || 0 });
+    if (body.length < 60000) fetch(`${SB_URL}/rest/v1/rpc/xp_push`, { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json', apikey: SB_ANON, Authorization: 'Bearer ' + SB_ANON }, body });
+  } catch(_){}
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible'){
     if (dayStart(Date.now()) !== lastRenderDay) render();
-    else pushState();
+    pullState(true);
   }
 });
+setInterval(() => { if (document.visibilityState === 'visible') pullState(true); }, 90000);
 
 /* ================= boot ================= */
 if (memoryOnly) toast('⚠️ Storage unavailable — changes won’t persist', 4000);
 render();
 switchTab(true);
+syncCardRender();
 pushState();
 setInterval(() => { if (dayStart(Date.now()) !== lastRenderDay) render(); }, 30000);
 </script>
